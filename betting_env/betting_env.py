@@ -37,7 +37,7 @@ class BettingEnv(gym.Env):
     observation_space : gym.spaces.Box
         The observation space for the environment.
         The observation space shape is (1, N) where N is the number of possible
-        outcomes for the game.
+        outcomes for the game + len(gameId, 2 lineups, ah line) .
 
     action_space : gym.spaces.Discrete
         The action space for the environment.
@@ -51,8 +51,6 @@ class BettingEnv(gym.Env):
     """
 
     metadata = {"render.modes": ["human"]}
-    # bet size
-    BET_SIZE = [0.05, 0.4, 0.7]  # small bet  # medium bet  # large bet
     # actions
     ACTIONS_LIST = [
         [0, 0, 0, 0, 0],  # no bets
@@ -73,21 +71,31 @@ class BettingEnv(gym.Env):
             "preGameAhHome",
             "preGameAhAway",
         ],
+        bet_size=[0.05, 0.4, 0.7],
         starting_bank=100,
     ):
         """Initializes a new environment
 
         Parameters
         ----------
-        odds: dataframe of shape (n_games, n_odds)
+        game_odds: pandas dataframe
             A list of games, with their betting odds.
         odds_column_names: list of str
-            A list of column names with length == n_odds.
+            A list of column names with length == number of odds.
+        bet_size: list
+            3 possible bets : small, medium and large
+        starting_bank: int
+            bank account
+
         """
 
         super().__init__()
         # games df
         self._game = game_odds.copy()
+        # sort data by date
+        if "gameDate" in self._game.columns:
+            self._game["gameDate"] = pd.to_datetime(self._game["gameDate"])
+            self._game = self._game.sort_values(by="gameDate")
         # odds columns names
         self._odds_columns_names = odds_column_names
         # odds (1X2 and Asian handicap) values
@@ -104,11 +112,13 @@ class BettingEnv(gym.Env):
         self._lineups = self._game[["homeTeamLineup", "awayTeamLineup"]].values
         # games ids
         self._game_ids = self._game["gameId"]
+        # bet size
+        self.bet_size = bet_size  # small bet, medium bet, large bet
         # observation space
         self.observation_space = gym.spaces.Box(
             low=1.0,
             high=float("Inf"),
-            shape=(1, 5),
+            shape=(1, (self._odds.shape[1] + 4)),
             dtype=numpy.float64,
         )
         # actions space
@@ -116,7 +126,7 @@ class BettingEnv(gym.Env):
             (
                 gym.spaces.Discrete(len(BettingEnv.ACTIONS_LIST)),  # betting action
                 gym.spaces.Discrete(
-                    len(BettingEnv.BET_SIZE)
+                    len(self.bet_size)
                 ),  # betting small or medium or large bet for the chosen action
             )
         )
@@ -175,7 +185,7 @@ class BettingEnv(gym.Env):
         # if the agent wants to bet
         if action[0] != 0:
             # bet value
-            size_bet = env.BET_SIZE[action[1]] * self.balance
+            size_bet = self.bet_size[action[1]] * self.balance
             # on which outcome the agent will bet
             bet_index = numpy.where(
                 numpy.array(BettingEnv.ACTIONS_LIST[action[0]]) == 1
@@ -199,7 +209,7 @@ class BettingEnv(gym.Env):
 
         Returns
         -------
-        observation : dataframe of shape (1, 5)
+        observation : dataframe
             The agent's observation of the current environment
         reward : float
             The amount of reward returned after previous action
@@ -239,7 +249,7 @@ class BettingEnv(gym.Env):
             info.update(results=results.argmax())
             info.update(reward=reward)
             # get the current observation
-            obs = self.get_observation(bet)
+            obs = self.get_observation()
             # increment step
             self.current_step += 1
             # check if we are finished
@@ -250,33 +260,37 @@ class BettingEnv(gym.Env):
         # return
         return obs, reward, done, info
 
-    def get_observation(self, bet):
+    def get_observation(self):
         """return the observation of the current step.
 
         Returns
         -------
-        obs : numpy.ndarray of shape (1, 5)
+        obs : numpy.ndarray of shape (1, n_odds + 4)
             The observation of the current step.
         """
         # current game
         index = self._get_current_index()
-        # bet choice
-        bet_choice = numpy.argmax(numpy.array(bet))
         # current game id
         game_id = self._game_ids[index]
         # current game lineups
         lineups = self._lineups[index]
         # chosen odds
-        betting_market = self.get_odds()[:, bet_choice : bet_choice + 1]
-        # chosen line (1x2 or the AH line)
-        line = self._lines[index] if bet_choice in [3, 4] else "1X2"
+        betting_market = self.get_odds()
+        betting_market_1X2 = betting_market[:, 0:3]
+        betting_market_ah = betting_market[:, 3:]
+        # chosen line (AH line)
+        line = self._lines[index]
         # the observation
         obs = {
             "gameId": game_id,
             "home_lineup": lineups[0],
             "away_lineup": lineups[1],
+            "odds_1": betting_market_1X2[0][0],
+            "odds_X": betting_market_1X2[0][1],
+            "odds_2": betting_market_1X2[0][2],
             "line": line,
-            "odds": betting_market[0].item(),
+            "odds_ah_home": betting_market_ah[0][0],
+            "odds_ah_away": betting_market_ah[0][1],
         }
         return pd.DataFrame(obs, index=[0]).values
 
@@ -296,7 +310,6 @@ class BettingEnv(gym.Env):
             The amount of reward returned after previous action
         """
         # agent choice
-        # bet_index = numpy.where(numpy.array(bet) == 1)[0].item()
         bet_index = numpy.argmax(numpy.array(bet))
         # bet size
         bet_size_matrix = self.bet_size_matrix
@@ -337,12 +350,12 @@ class BettingEnv(gym.Env):
 
         Returns
         -------
-        observation : dataframe of shape (1, n_odds)
+        observation : dataframe
             the initial observation.
         """
         self.balance = self.starting_bank
         self.current_step = 0
-        return self.get_odds()
+        return self.get_observation()
 
     def render(self, mode="human"):
         """Outputs the current balance and the current step.
@@ -442,7 +455,7 @@ class BettingEnv(gym.Env):
             "current_step": self.current_step,
             "odds": self.get_odds(),
             "bet_action": env.ACTIONS_LIST[action[0]],
-            "bet_size": env.BET_SIZE[action[1]],
+            "bet_size": self.bet_size[action[1]],
             "balance": self.balance,
             "reward": 0,
             "legal_bet": False,
